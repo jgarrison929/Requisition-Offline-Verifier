@@ -5,6 +5,7 @@
 
     python3 -I bin/verify_offline.py --arguments ARGS.json --act-type NAME --record RECORD.json \
         --lab-verify /path/to/requisition/bin/lab-verify --registry LAB-KEYS.json \
+        [--check-expiry] [--at YYYY-MM-DDTHH:MM:SSZ] \
         [--checkpoint NOTE --inclusion-proof PROOF.json --witness-policy POLICY [--held-size N --held-root ROOT |
          --held-state FILE [--write-held-state]] [--consistency-proof PROOF.json] [--key-transition RECORD.json]]
 
@@ -109,13 +110,23 @@ co-signature beside the record, whose bytes are part of the record's leaf in the
 checkpoint_ verdict_code) FAILS with exit 6, naming it; a pass requires the line "log checkpoint: all checks held: ..."
 in bin/lab-verify's answer (else exit 6 as well), and its PASS line says what the checkpoint shows and no more.
 
+VALIDITY WINDOW (opt-in: --check-expiry, --at YYYY-MM-DDTHH:MM:SSZ). By default this file does not consult the
+system clock so historical records verify offline without changing verdict over time. When --check-expiry is given
+(against the current UTC clock) or --at INSTANT is given (against a deterministic UTC instant; overrides the clock
+if both are given), every present signed validity bound in metadata is checked after binding and signatures pass:
+lower bounds (nbf, not_before) require at >= bound, and upper bounds (exp, exec_not_after, not_after) require
+at < bound (half-open [lower, upper), matching THE KEY RULE). Any present bound that is not a real UTC calendar
+instant in YYYY-MM-DDTHH:MM:SSZ form, or a record carrying no upper expiry bound at all, fails closed (exit 7).
+A malformed --at value is a usage error (exit 2).
+
 EXIT: 0 every half passes (binding equal; lab-verify lab_dev_key for a signer-dev record and lab_kms_key
 for a signer-kms one, or for an ML-DSA-87 record
 lab_signature_unchecked_mldsa87 AND the ML-DSA-87 signature valid here); 1 a binding mismatch or an
 unreadable record; 3 lab-verify did not answer as above; 4 the ML-DSA-87 signature, the co-signature or its key
 entry fails, or post-quantum is required (--require-pq, or the key file) and not met; 6 the log checkpoint is
-refused, or not said to hold (LOG CHECKPOINTS); 2 usage, including a usage error bin/lab-verify reports for the
-checkpoint inputs (exit 2 there). Standard library
+refused, or not said to hold (LOG CHECKPOINTS); 7 the opt-in validity-window check failed (expired, not yet valid,
+unreadable bound, or absent expiry bound); 2 usage, including a malformed --at value or a usage error bin/lab-verify
+reports for the checkpoint inputs (exit 2 there). Standard library
 and the one vendored file only.
 
 The encoder below is a second copy of requisition_aws/canonical.py's (this file must run under -I,
@@ -124,6 +135,7 @@ which cannot import the package); tests/test_verify_offline.py pins the two equa
 
 import base64
 import binascii
+import datetime
 import hashlib
 import json
 import os
@@ -136,6 +148,9 @@ LABEL = "sha384+canonical_payload.v3"
 ENVELOPE = ("signature", "key_id", "signed_payload", "receipt_hash")
 EXIT_OK, EXIT_MISMATCH, EXIT_USAGE, EXIT_LAB_VERIFY, EXIT_SIGNATURE = 0, 1, 2, 3, 4
 EXIT_CHECKPOINT = 6
+EXIT_VALIDITY = 7
+VALIDITY_LOWER_BOUNDS = ("nbf", "not_before")
+VALIDITY_UPPER_BOUNDS = ("exp", "exec_not_after", "not_after")
 # the log checkpoint's flags, handed to bin/lab-verify as given (LOG CHECKPOINTS), and the line that says every check held
 CHECKPOINT_FLAGS = ("--checkpoint", "--inclusion-proof", "--witness-policy", "--held-size", "--held-root",
                     "--consistency-proof", "--key-transition", "--held-state")
@@ -777,6 +792,61 @@ def check_cosignature(envelope, cosignature, registry, mldsa=None, accept_signer
     return lines + pq_lines, pq_ok, True
 
 
+def _valid_instant(value):
+    """True when ``value`` is ``YYYY-MM-DDTHH:MM:SSZ`` (ASCII digits only) naming a real calendar instant."""
+    if not _is_instant(value):
+        return False
+    year, month, day = int(value[0:4]), int(value[5:7]), int(value[8:10])
+    hour, minute, second = int(value[11:13]), int(value[14:16]), int(value[17:19])
+    if month < 1 or month > 12 or hour > 23 or minute > 59 or second > 59:
+        return False
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[month - 1]
+    return 1 <= day <= days
+
+
+def check_validity_window(signed_md, at):
+    """Check signed validity-window bounds in ``signed_md`` against UTC instant ``at`` (half-open ``[lower, upper)``).
+    Return ``(lines, ok, reason)``. Fails closed on unreadable bounds, absent upper expiry bounds, not-yet-valid,
+    or expired."""
+    lines, unreadable, not_yet, expired, upper_present = [], [], [], [], 0
+    for name in VALIDITY_LOWER_BOUNDS:
+        if name not in signed_md:
+            continue
+        val = signed_md[name]
+        if not _valid_instant(val):
+            unreadable.append(name)
+            lines.append("%s: UNREADABLE (signed %r; expected YYYY-MM-DDTHH:MM:SSZ)" % (name, val))
+        elif at < val:
+            not_yet.append("%s %s" % (name, val))
+            lines.append("%s: NOT YET VALID (%s < %s)" % (name, at, val))
+        else:
+            lines.append("%s: valid (%s >= %s)" % (name, at, val))
+    for name in VALIDITY_UPPER_BOUNDS:
+        if name not in signed_md:
+            continue
+        upper_present += 1
+        val = signed_md[name]
+        if not _valid_instant(val):
+            unreadable.append(name)
+            lines.append("%s: UNREADABLE (signed %r; expected YYYY-MM-DDTHH:MM:SSZ)" % (name, val))
+        elif at >= val:
+            expired.append("%s %s" % (name, val))
+            lines.append("%s: EXPIRED (%s >= %s)" % (name, at, val))
+        else:
+            lines.append("%s: valid (%s < %s)" % (name, at, val))
+    if unreadable:
+        return lines, False, "bound_unreadable: " + ", ".join(unreadable)
+    if upper_present == 0:
+        lines.append("expiry: ABSENT (the signed record carries none of %s)" % ", ".join(VALIDITY_UPPER_BOUNDS))
+        return lines, False, "expiry_absent"
+    if not_yet:
+        return lines, False, "not_yet_valid: %s at %s" % (", ".join(not_yet), at)
+    if expired:
+        return lines, False, "expired: %s at %s" % (", ".join(expired), at)
+    return lines, True, None
+
+
 def main(argv):
     opts, i = {"checkpoint": []}, 0
     flags = ("--arguments", "--act-type", "--record", "--lab-verify", "--registry", "--python", "--cosignature")
@@ -787,6 +857,12 @@ def main(argv):
         elif argv[i] == "--allow-classical-only":
             opts["allow-classical-only"] = True
             i += 1
+        elif argv[i] == "--check-expiry":
+            opts["check-expiry"] = True
+            i += 1
+        elif argv[i] == "--at" and i + 1 < len(argv) and "at" not in opts:
+            opts["at"] = argv[i + 1]
+            i += 2
         elif argv[i] == "--accept-signer" and i + 1 < len(argv) and argv[i + 1]:
             opts.setdefault("accept-signer", []).append(argv[i + 1])
             i += 2
@@ -802,8 +878,9 @@ def main(argv):
         else:
             print("usage: verify_offline.py --arguments ARGS.json --act-type NAME --record RECORD.json "
                   "--lab-verify PATH --registry KEYS.json [--cosignature COSIG.json] [--require-pq] [--allow-classical-only] "
-                  "[--accept-signer LABEL]... [--python python3] [--checkpoint NOTE --inclusion-proof PROOF.json "
-                  "--witness-policy POLICY [--held-size N --held-root ROOT | --held-state FILE [--write-held-state]] "
+                  "[--accept-signer LABEL]... [--check-expiry] [--at YYYY-MM-DDTHH:MM:SSZ] [--python python3] "
+                  "[--checkpoint NOTE --inclusion-proof PROOF.json --witness-policy POLICY "
+                  "[--held-size N --held-root ROOT | --held-state FILE [--write-held-state]] "
                   "[--consistency-proof PROOF.json] [--key-transition RECORD.json]]",
                   file=sys.stderr)
             return EXIT_USAGE
@@ -811,6 +888,17 @@ def main(argv):
     if missing:
         print("usage: missing --" + ", --".join(missing), file=sys.stderr)
         return EXIT_USAGE
+    if "at" in opts:
+        if not _valid_instant(opts["at"]):
+            print("usage: --at requires a real UTC instant in YYYY-MM-DDTHH:MM:SSZ form, got %r" % (opts["at"],),
+                  file=sys.stderr)
+            return EXIT_USAGE
+        check_at, check_at_source = opts["at"], "--at"
+    elif opts.get("check-expiry"):
+        check_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        check_at_source = "system clock UTC"
+    else:
+        check_at, check_at_source = None, None
     try:
         args = load(opts["arguments"])
         record = load(opts["record"])
@@ -915,6 +1003,14 @@ def main(argv):
     if pq_required_unmet:
         print("verdict: FAIL (post-quantum required: %s)" % pq_required_unmet)
         return EXIT_SIGNATURE
+    if check_at is not None:
+        print("== validity window: signed time bounds at %s (%s)" % (check_at, check_at_source))
+        v_lines, v_ok, v_reason = check_validity_window(signed_md, check_at)
+        for line in v_lines:
+            print("  " + line)
+        if not v_ok:
+            print("verdict: FAIL (validity window: %s)" % v_reason)
+            return EXIT_VALIDITY
     # The ARNs a signer-kms PASS names are compared values only: the record's own (bin/lab-verify's check_kms_key,
     # on both of its paths) and, beside a co-signature that checked out above, the signed cosign.kms_key_arn
     # (check_cosignature passes a cosign member that has one only when cosigning_kms_key found it to be its key's).
@@ -944,6 +1040,8 @@ def main(argv):
     if opts["checkpoint"]:
         said += (" It is included in a checkpoint of the evaluation environment's log that the log key and the "
                  "witnesses of the given policy signed, not older than the tree size given (section 4).")
+    if check_at is not None:
+        said += " Its signed validity window held at %s (%s)." % (check_at, check_at_source)
     print("verdict: PASS -- the record is bound to these arguments and %s under the LAB key(s)%s. %s"
           % (signatures, keys, said))
     return EXIT_OK

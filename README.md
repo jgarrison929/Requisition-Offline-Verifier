@@ -126,7 +126,7 @@ A pass does not prove the following, and this repository does not claim it.
 - **The keys are evaluation keys, not a trust root.** Each entry of the key file is marked `"profile": "lab"`. You are trusting this repository to give you the right key file. A production deployment anchors its keys in a trust root that the relying party controls; that is not shown here.
 - **Key custody is asserted, not verified.** The key file says the two private keys, keys of the evaluation environment, are held in AWS KMS and cannot be exported. An offline check cannot confirm where a private key lives.
 - **Nothing proves the action was carried out.** The records are a statement and a decision. A pass says nothing about what happened after the decision.
-- **Signed times are not compared with the current time.** The statement carries `occurred_at`, `iat`, `nbf` and `exp`; the decision carries `occurred_at`, `decided_at`, `not_after` and `exec_not_after`. The verifier checks that each key was valid at the record's signed `occurred_at`; it does not check whether a record has since expired. These are historical records.
+- **Signed times are not compared with the current time by default.** The statement carries `occurred_at`, `iat`, `nbf` and `exp`; the decision carries `occurred_at`, `decided_at`, `not_after` and `exec_not_after`. By default (`verify.sh`), the verifier checks that each key was valid at the record's signed `occurred_at` and does not consult the system clock so historical records verify offline. To enforce the signed validity window (`[nbf/not_before, exp/exec_not_after/not_after)`), pass `--check-expiry` (checks against current UTC time) or `--at YYYY-MM-DDTHH:MM:SSZ` (checks deterministically against a chosen UTC instant) to `verifier/verify_offline.py`; expired, not-yet-valid, malformed, or absent expiry bounds fail closed with exit status 7 (a malformed `--at` exits 2). Run `sh expiry-test.sh` to exercise these cases.
 - **One record is judged at a time.** A pass says nothing about other records of the same environment: whether a later record exists, or whether a record was withheld.
 - **The server is not public.** You can verify the signed output of the run. You cannot reproduce the run.
 
@@ -174,6 +174,7 @@ Fields in the signed payload that a reader may ask about:
 verify.sh              the one command
 tamper-test.sh         negative tests
 checkpoint-test.sh     check 4 over the evaluation environment's checkpoint vectors
+expiry-test.sh         opt-in validity-window / expiry tests (--check-expiry, --at)
 expected-output.txt    the output of verify.sh
 record/
   arguments.json       the arguments of the action
