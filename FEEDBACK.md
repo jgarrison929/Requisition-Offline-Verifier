@@ -1,6 +1,6 @@
 # Offline test notes
 
-Tested the public verifier in this checkout. The documented suite passes. The cryptographic checks that were tried (bit flips, swapped signatures, a forged identity-key signature, a changed amount, a non-normalized reason) fail closed. The gaps are about what a pass is allowed to mean: the one command does not require a statement plus a linked allow decision, it does not enforce two approvers, and it does not look at the expiry fields the records already carry.
+Tested the public verifier in this checkout, then a second pass on 2026-11-20 over canonicalization, the signature code, the checkpoint checker, the Elixir and Go sources, and the shell scripts. The documented suite passes. The cryptographic checks that were tried fail closed. The gaps are about what a pass is allowed to mean, plus one checkpoint-quorum bug found on the second pass: a witness policy that repeats a name counts that one signature once per repetition.
 
 Nothing in this file changes the verifier. Throwaway keys and mutated copies stayed in a temp directory and were not committed.
 
@@ -51,6 +51,28 @@ These were copies under `/tmp`. The published tree was not modified.
 - The same throwaway record with `--require-pq` and no ML-DSA signature: exit 4, `post-quantum REQUIRED (--require-pq): NOT MET`. `verify.sh`'s flag still fails closed when the post-quantum signature is missing.
 
 The throwaway records below were signed with a local Ed25519 key (public key SHA-256 `e35b9e19f9c6449fbc867a6ff145eb8722003fdd18ce6ad50c63c8ce90001500`), placed alone in a temp key file as `signer: kms` with a lab KMS key id. They are not the published AWS KMS keys, and they are not evidence that a published signature can be forged. They show which checks the program applies after a signature it can verify.
+
+### Second pass, 2026-11-20
+
+The cited line numbers from the first pass were re-read. None of those claims was withdrawn. The new runs below are the ones that changed the list.
+
+Refused, with no traceback:
+
+- Inclusion proof with one extra hash appended to `checkpoint-vectors/proofs/inclusion-main-1-at-7.json`, otherwise the passing `b.cosigned` inputs: exit 6, `checkpoint_inclusion_invalid` (`the receipt is not leaf 1 of the tree of size 7`).
+- That proof with `tree_size` set to 0: exit 6, `checkpoint_proof_malformed` (`the proof's tree_size is 0, not 7`).
+- `leaf_index` set to -1: exit 6, `checkpoint_inclusion_invalid`.
+- A trailing line after `notes/b.cosigned`: exit 6, `checkpoint_note_malformed`.
+- The same witness line twice is already in the suite (`one-witness-twice` → `checkpoint_note_malformed`). The note parser rejects it at `verifier/verify_receipt.py` lines 636-637. That does not fix bug 5: the repeat there is on the note, and the bug is on the policy.
+- Arguments with trailing text, a lone surrogate (`\uD800`), a non-UTF-8 byte, `NaN`, or a 20-digit integer: exit 1, `binding: UNREADABLE (...)`, `verdict: FAIL`.
+- Adding the group order L to the S half of the published decision's Ed25519 signature: `ed25519_verify` returns false and `_refusal` returns `ed25519_non_canonical`. The unmodified signature returns true. S is checked against L before the equation (`verifier/verify_receipt.py` lines 223-224 and 238-239).
+- A one-leaf inclusion check with the RFC 9162 `0x00` leaf prefix matches; the same leaf hashed with no prefix does not. `checkpoint_verify_inclusion(..., size=0)` returns false. Node hashes use `0x01` (`_cp_node`, lines 521-522).
+
+Not filed as separate bugs:
+
+- v3 hashes the integer lexemes `0` and `-0` to the same act hash (`ff0ee60de1e09228...`). v4 refuses `-0` (`negative_zero`). v3 is the encoder verification uses, and both lexemes are the integer 0, so this is not a different refund amount. It is the same fact as the v3/v4 note in Enhancements.
+- Duplicate member names are rejected by `loads_strict`, including a nested object (`ValueError: duplicate member`). Elixir's receipt reader throws on a repeated name after `Map.new` (`elixir/sources/verify_receipt.exs` lines 817-819). The Go file does not parse these records.
+- `verify.sh`, `tamper-test.sh`, `checkpoint-test.sh`, and `interop/run-all.sh` were read for pipes, `set -e`, and GNU-only flags. None of them masks a failing command into exit 0. `verify.sh` does collapse every non-zero Python status to 1 (lines 15-19). The README only promises exit 0 on success, so that is not a false pass. `sha256sum` is not used by those scripts; `interop/run-all.sh` lines 78-80 fall back to `shasum -a 256`, and the README already says to use that on macOS. This machine is Linux, so that fallback was not run.
+- Elixir and Go were not executed. Elixir has no canonical-payload encoder. `interop/verifiers/go-crypto-mldsa/main.go` only runs ML-DSA-87 verify and passes the case-file context through (`mldsa.Options{Context: ...}`, lines 31-36), which is what `interop/verifiers/mldsa-py/verify.py` does. The Ed25519 pre-checks in `elixir/sources/verify_receipt.exs` lines 66-84 match `verifier/verify_receipt.py` `_refusal` (canonical point, small order, mixed-order public key, `S >= L`). Elixir then calls OTP `:crypto.verify`; this tree's Python computes the RFC 8032 equation itself and does not reduce the hash modulo L. Mixed-order public keys are refused before that equation, which is the case the two styles can disagree on (`verifier/lab-verify` lines 382-386). No input was found that one accepts and the other was shown to accept. Elixir itself was not run.
 
 ## Bugs
 
@@ -164,6 +186,48 @@ This does not forge a published signature. Whoever holds the private key can cho
 
 **Priority.** Medium.
 
+### 5. A witness quorum counts a repeated name once per listing
+
+**Why it matters.** The counter walks the member list and adds one for every entry whose witness signed, without collapsing repeated names. A threshold of 2 is then met by one signature when that witness's name is written twice. A policy that says threshold 2 and lists the same witness twice is satisfied by that one signature. The pass line then says the quorum was met. The published `checkpoint-vectors/policies/main.policy` lists `w1 w2 w3` once each, and the 32-case suite still passes. This does not change `sh verify.sh`, which does not take a witness policy. It does mean a relying party cannot trust the threshold number unless they have also checked that no name is repeated, including through a group that is named twice.
+
+**Evidence.** Control, one witness against the real policy (`group quorum-group 2 w1 w2 w3`), checkpoint `notes/b.one-witness`:
+
+```
+python3 -I verifier/verify_offline.py \
+  --arguments checkpoint-vectors/arguments.json --act-type payments.refund_send \
+  --record checkpoint-vectors/records/main-1.json --registry checkpoint-vectors/lab-keys.json \
+  --lab-verify verifier/lab-verify \
+  --checkpoint checkpoint-vectors/notes/b.one-witness \
+  --inclusion-proof checkpoint-vectors/proofs/inclusion-main-1-at-7.json \
+  --witness-policy checkpoint-vectors/policies/main.policy
+```
+
+Exit 6, `verdict: FAIL (the log checkpoint: checkpoint_quorum_not_met)`, `cosigned by: witness-1.invalid`.
+
+The same command with the group line changed to `group quorum-group 2 w1 w1`:
+
+```
+EXIT: 0
+log checkpoint: witness quorum quorum-group met; cosigned by witness-1.invalid (key 9b21c34f)
+verdict: PASS
+```
+
+Only witness-1 signed that note. The same single signature also passes a policy whose quorum group is `2 inner inner` where `inner` is `group inner 1 w1` (exit 0, same "quorum met" line).
+
+`verifier/verify_receipt.py` lines 689-693:
+
+```
+if component[0] == "witness":
+    return (component[1]["name"], component[1]["id"]) in signers
+return sum(1 for member in component[2] if _cp_satisfied(policy, member, signers)) >= component[1]
+```
+
+The group parser (lines 579-593) does not require the member names to be unique. The same count is in `elixir/sources/verify_receipt_checkpoint.exs` lines 241-245 and in the derived `elixir/lib/log_checkpoint.ex` lines 241-245 (`Enum.count(members, ...)`). Elixir was not executed; the Python command above was.
+
+**Effort.** Small. Count a satisfied member once, and reject a group line that repeats a name.
+
+**Priority.** High for check 4. It is not on the path of `sh verify.sh`.
+
 ## Enhancements
 
 ### Check `exp`, `not_after`, and `exec_not_after`
@@ -227,7 +291,7 @@ verdict: PASS
 
 **Why it matters.** `verifier/verify_offline.py` contains two encoders. Verification uses only v3 (`derivation_label`, lines 645-647, always returns `sha384+canonical_payload.v3`). v3 escapes U+000B as `\u000B` (uppercase, line 193). v4 escapes it as `\u000b` (lowercase, line 264, the RFC 8785 form). A second implementation that "corrects" the case will disagree on any argument that contains a control character. The published arguments are printable ASCII, so this run is unaffected. This fails closed (a mismatch), it does not accept a forged hash.
 
-**Evidence.** Calling `encode` and `encode_v4` on `{"c": "\u000b"}` produced `{"c":"\u000B"}` and `{"c":"\u000b"}`.
+**Evidence.** Calling `encode` and `encode_v4` on `{"c": "\u000b"}` produced `{"c":"\u000B"}` and `{"c":"\u000b"}`. On a second pass, v3's act hash of `amount_minor` `0` and of the lexeme `-0` were the same (`ff0ee60de1e09228cbe7269a0a132618fd8cc6ae9c2504843acde16e133824dc6edbaa5e751a713cd8a321456bbbac0e`). `canonicalize_v4('{"amount_minor": -0}')` raises `negative_zero`. Verification does not call v4.
 
 **Effort.** Small. One sentence next to the v3 encoder, or stop shipping the unused v4 copy if it stays withdrawn.
 
@@ -282,8 +346,10 @@ These are stated limits or decisions, not a hidden failure of this run. The feat
 
 ## Top 5 to hand over
 
+The second pass put the quorum bug in the top 5 in place of the ARN check. The ARN check is still bug 4. The checkpoint request stayed as item 5; the README already states that gap.
+
 1. **Require a statement and a linked `allow` decision in `verify.sh`.** Copying `statement.json` over `decision.json` still exits 0 and prints `RESULT: PASS (both records verify)`, with `signed verdict: none` on both paths.
 2. **Check two distinct approvers on both records.** The published decision has no `sanctioners` member, both records are signed `one-person (G-301)`, and `verifier/lab-verify` lines 760-762 return immediately for that label. `sh verify.sh` exits 0. A same-person-twice record exits 0 when the post-quantum flag is not what rejects it.
-3. **Honor `exp`, `not_after`, and `exec_not_after`.** `sh verify.sh` exits 0 on 2026-11-19. The decision's `exec_not_after` is `2026-11-13T15:57:48Z`. The README already says the clock is not consulted. This is a request to add the check.
-4. **Publish a witnessed log checkpoint for these two records and run it from `verify.sh`.** `README.md` line 92: `verify.sh` does not run check 4, and this tree has no checkpoint for the 13 November records. `checkpoint-test.sh` covers a different lab key.
-5. **Parse the KMS ARN strictly, and do not call it pinned by the key file unless the key file has that field.** A signed ARN of `arn:aws:kms:eu-west-1:999999999999:alias/not-a-key:key/<resource>` exits 0 and is printed as pinned. `check_kms_key` only requires an `arn:` prefix, service `kms`, and a `:key/<resource>` suffix (`verifier/lab-verify` lines 623-628).
+3. **Count distinct witnesses toward a quorum.** A policy line `group quorum-group 2 w1 w1` and a checkpoint signed by witness-1 only exits 0 and prints `witness quorum quorum-group met`. The same note against `2 w1 w2 w3` exits 6, `checkpoint_quorum_not_met`. `verifier/verify_receipt.py` lines 689-693. The same count is in the Elixir checkpoint module (not run).
+4. **Honor `exp`, `not_after`, and `exec_not_after`.** `sh verify.sh` exits 0 on 2026-11-19. The decision's `exec_not_after` is `2026-11-13T15:57:48Z`. The README already says the clock is not consulted. This is a request to add the check.
+5. **Publish a witnessed log checkpoint for these two records and run it from `verify.sh`.** `README.md` line 92: `verify.sh` does not run check 4, and this tree has no checkpoint for the 13 November records. `checkpoint-test.sh` covers a different lab key. Bug 5 is why that checker still needs a distinct-witness count before those checkpoints are trusted.
