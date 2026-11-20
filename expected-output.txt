@@ -47,4 +47,13 @@ verdict: PASS -- the record is bound to these arguments and its Ed25519 signatur
   post-quantum REQUIRED (--require-pq): met
 verdict: PASS -- the record is bound to these arguments and its Ed25519 signature AND its ML-DSA-87 (post-quantum) co-signature over the same bytes are valid under the LAB key(s) the key file pins as AWS KMS keys arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf, arn:aws:kms:us-east-2:847072440326:key/fd9cf1e7-608c-4f34-b5fe-cdf4cc37620d (lab profile, lab keys, not a trust root; KMS custody is the key file's statement, not checked offline). What it decided is its signed verdict, above.
 
+######## pair: record/statement.json -> record/decision.json
+  statement: requisition.lab.statement.v0 (receipt_hash be1414f11f885ab2de74fb8a0f37c7d923f7e8f9b5438d1fdc8d81c352db164a)
+  decision: requisition.lab.decision.v0 (receipt_hash 276f2f8785a119bcd4c647df67c467b38265e10a0fe2f71e47e23ae1b2f5b859)
+  statement_id: equal (be1414f11f885ab2de74fb8a0f37c7d923f7e8f9b5438d1fdc8d81c352db164a)
+  act_hash: equal (1d175c860a37ab40929be42f3294c9cdf789ff8836976120908e3ef3ea56536d0f144cf922b3f02ed1646483067128f4)
+  chain_scope: equal (requisition-lab:account:ca893414-ff17-42c9-b40c-bd1b5a8943b1; sequence 15 -> 16; previous_hash matches statement)
+  signed verdict: allow
+verdict: PASS -- statement and decision are in their roles, cryptographically linked, and the decision verdict is allow.
+
 RESULT: PASS (both records verify)
