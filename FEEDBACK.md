@@ -353,3 +353,95 @@ The second pass put the quorum bug in the top 5 in place of the ARN check. The A
 3. **Count distinct witnesses toward a quorum.** A policy line `group quorum-group 2 w1 w1` and a checkpoint signed by witness-1 only exits 0 and prints `witness quorum quorum-group met`. The same note against `2 w1 w2 w3` exits 6, `checkpoint_quorum_not_met`. `verifier/verify_receipt.py` lines 689-693. The same count is in the Elixir checkpoint module (not run).
 4. **Honor `exp`, `not_after`, and `exec_not_after`.** `sh verify.sh` exits 0 on 2026-11-19. The decision's `exec_not_after` is `2026-11-13T15:57:48Z`. The README already says the clock is not consulted. This is a request to add the check.
 5. **Publish a witnessed log checkpoint for these two records and run it from `verify.sh`.** `README.md` line 92: `verify.sh` does not run check 4, and this tree has no checkpoint for the 13 November records. `checkpoint-test.sh` covers a different lab key. Bug 5 is why that checker still needs a distinct-witness count before those checkpoints are trusted.
+
+## Upstream GitHub Issue Drafts (Private-Key / System-Side Items)
+
+These two requests need signatures or a log checkpoint from the evaluation environment. An outside patch can change the checker. It cannot mint the KMS signatures or the witness cosignatures. The drafts below are for Joshua to copy onto `ScriptKittyOS/Requisition-Offline-Verifier` if he wants to. Nothing in this review opened an issue there.
+
+Verifier-side code (linking the statement to the decision, requiring `allow`, counting distinct witnesses, the ARN check) is separate and is not these drafts.
+
+### Draft 1
+
+**Suggested title:** Publish two-approver statement and decision fixtures (both records, two distinct sanctioners)
+
+**Body:**
+
+Hello,
+
+The 13 November records read as a two-account approval, and `sh verify.sh` still exits 0 without checking that. Both records are signed `hands: one-person (G-301)`. The decision does not carry `sanctioners` at all. For the `one-person` label, `verifier/lab-verify` returns before it looks at who approved (`verifier/lab-verify` lines 760-762). The two-account label does check for two distinct sanctioners and two distinct `approval_records` (lines 763-767), and these records do not use that label.
+
+An outside change can make the checker require two distinct approvers. It cannot replace the published signatures. Those were made by the evaluation environment's AWS KMS keys. Could you sign and publish a statement and a decision that both carry two distinct sanctioners (neither of them the requester), under `hands: two-account, two-passkey (G-301)`, plus a small negative fixture for the same person twice? `verify.sh` on the new files should fail if either record drops back to one person or omits the approver list.
+
+What we saw on the current files (Python 3.12.3, Linux, 2026-11-19). `sh verify.sh` exited 0 and matched `expected-output.txt`. The signed metadata was:
+
+```
+statement.hands one-person (G-301)
+statement.sanctioners ['d4cbec5b-cba2-44ae-b9b4-94795a00735f', '517c6d9d-26d6-4d96-9633-5b88998eea6a']
+statement.principal rqp_fb3ce799775da309383baec33f3c8e7f
+decision.hands one-person (G-301)
+decision has sanctioners False
+decision.verdict allow
+```
+
+`README.md` lines 69-71 say the request was approved by two separate accounts, neither of them the requester's, and that the statement fixes the identifiers of the two approver accounts. The decision (line 72) is the `allow`. The success output never prints the sanctioners.
+
+A record signed locally, not with the published KMS keys, shows the checker itself accepts a duplicated approver when the label is `one-person`. Command shape:
+
+```
+python3 -I verifier/verify_offline.py --arguments arguments.json --act-type payments.refund_send \
+  --record one-person-duplicate-sanctioners.json --registry registry.json \
+  --lab-verify verifier/lab-verify --accept-signer kms
+```
+
+The signed `sanctioners` were `["same-person", "same-person"]` and `principal` was `same-person`. Exit 0, `signed verdict: allow`, `verdict: PASS`. The same file with `--require-pq` and no ML-DSA signature exits 4, so this is the hands check, not a bypass of `verify.sh`'s post-quantum flag. The same shape with `hands` `two-account, two-passkey (G-301)` and a duplicated sanctioner exits 3, `lab_hands_unsupported`.
+
+**Done when:**
+
+- Both published records (or a clearly labeled successor pair) include two distinct sanctioner ids, the same set on the statement and the decision, and neither id is the requester's `principal`.
+- Both are signed `two-account, two-passkey (G-301)` (or the checker is specified to require that label for this bundle).
+- Ed25519 and ML-DSA-87 signatures verify under the published key file with `sh verify.sh`.
+- A negative fixture with the same approver twice is refused, and the command and expected refusal are in the repo.
+- `expected-output.txt` and `SHA256SUMS` match the new bytes.
+
+This needs the evaluation environment's signing keys. Publishing a patch that only changes `lab-verify` leaves the 13 November signatures on the `one-person` label.
+
+Prepared with AI assistance (Cursor agent) at the direction of Joshua Garrison; reviewed against the repo's own test scripts.
+
+### Draft 2
+
+**Suggested title:** Publish a witnessed log checkpoint for the 13 November statement and decision
+
+**Body:**
+
+Hello,
+
+`verify.sh` checks the two signatures and the argument binding. It does not check that these records are in the evaluation environment's transparency log. `README.md` line 92 says so directly: `verify.sh` does not run this check, and this repository holds no checkpoint of the evaluation environment for the two records above.
+
+The checkpoint command that does exist is `sh checkpoint-test.sh`. On Python 3.12.3 it exited 0 with:
+
+```
+RESULT: PASS (32 cases: 6 pass, 26 refused by name, each as expected)
+```
+
+Those 32 cases live under `checkpoint-vectors/` and use a development Ed25519 key, not the AWS KMS keys in `record/public-keys.json`. `PROVENANCE.md` says the same. A pass of `verify.sh` on the 13 November files therefore does not show inclusion under a checkpoint those keys' log signed, or that the witnesses in a relying party's policy cosigned it.
+
+The checker for that is already in `verifier/verify_offline.py` (`--checkpoint`, `--inclusion-proof`, `--witness-policy`). An outside patch can make `verify.sh` pass those flags. It cannot produce the signed note, the inclusion proof, or the witness cosignatures. Those come from the evaluation log and from witness keys the relying party can name.
+
+Could you publish, for `record/statement.json` and `record/decision.json`:
+
+- the checkpoint note the log key signed
+- an inclusion proof for each record at that tree size
+- the witness cosignatures your quorum expects
+- a witness policy a relying party can pin
+- a consistency proof if the note is ahead of a tree size you also publish
+
+Then run that check from `verify.sh`, and refresh `expected-output.txt`. Please also count distinct witness names toward the quorum: today `group quorum-group 2 w1 w1` with a note signed only by witness-1 exits 0 and prints `witness quorum quorum-group met` (`verifier/verify_receipt.py` lines 689-693). The same note against `group quorum-group 2 w1 w2 w3` exits 6, `checkpoint_quorum_not_met`. The published `main.policy` does not repeat a name. A new policy for the 13 November log should not either.
+
+**Done when:**
+
+- The repo contains a checkpoint, inclusion proof, and witness material for both 13 November records, under the same keys `verify.sh` already uses (or a documented successor).
+- `sh verify.sh` runs that check and exits 0 only when inclusion and the witness quorum hold.
+- A negative case (truncated proof, one witness when the policy asks for two, or a repeated witness name counted twice) is refused by name, the way `checkpoint-test.sh` already refuses its 26 negative lab cases.
+- The output of `sh verify.sh` matches `expected-output.txt`.
+
+Prepared with AI assistance (Cursor agent) at the direction of Joshua Garrison; reviewed against the repo's own test scripts.
