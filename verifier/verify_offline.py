@@ -36,12 +36,15 @@ Two independent halves, both reported:
     A RECORD REQUISITION'S LAB KMS SEAT SIGNED:
     the signed metadata says "signer": "kms" and names "kms_key_arn". bin/lab-verify then answers
     verdict_code lab_kms_key, and lab_dev_key only for a signer-dev record. Each code is accepted only
-    for its own signer; a mismatch is a FAIL (exit 3). The PASS line of a signer-kms record prints,
-    as the keys the key file pins as AWS KMS keys, the record's signed kms_key_arn (bin/lab-verify
-    has compared it with the record's key_id) and, beside a co-signature whose signed cosign member
-    has a kms_key_arn, that ARN (this file has compared it with the co-signing key's id: A
-    CO-SIGNING LAB KMS KEY, below). It prints no other ARN, and says what offline checking cannot:
-    that the private keys are held in AWS KMS is the key file's statement, not checked here.
+    for its own signer; a mismatch is a FAIL (exit 3). The PASS line of a signer-kms record prints
+    the record's signed kms_key_arn (bin/lab-verify has validated it against the record's key_id
+    and any kms_key_arn pinned in its key file entry) and, beside a co-signature whose signed
+    cosign member has a kms_key_arn, that ARN (this file has validated it against the co-signing
+    key's id and any kms_key_arn pinned in its key file entry: A CO-SIGNING LAB KMS KEY, below).
+    It says the key file pins an ARN only when the key file entry carries a matching kms_key_arn;
+    otherwise it states that the key file does not pin kms_key_arn. It prints no other ARN, and
+    says what offline checking cannot: that the private keys are held in AWS KMS is the key file's
+    statement, not checked here.
 
 RECORD.json may also be an ML-DSA-87 record's AgentReceipt form (LabRecords.agent_receipt_form/1: the
 eleven agent_receipt.v1 fields as top-level members plus "signature" and "key_id"), bare or under "receipt"
@@ -76,8 +79,9 @@ record's own key). Requisition signs "signer": "kms" and "kms_key_arn" into the 
 co-signing seat is a KMS key, and neither when it is the dev seat (LabRecords.cosign_member/2). The
 signed cosign member marks its key a lab KMS key when it says "signer": "kms" or has a kms_key_arn
 member. A marked key's cosign member and key file entry must both say signer kms, its key_id must be
-the lab KMS prefix of its algorithm + a resource id, and the signed cosign.kms_key_arn must be a KMS
-key ARN ending in key/<that resource id>. Otherwise the record FAILS (exit 4) with one line naming the
+the lab KMS prefix of its algorithm + a resource id, and the signed cosign.kms_key_arn must be a valid
+AWS KMS key ARN for key/<that resource id> (and match the key file entry's kms_key_arn when present).
+Otherwise the record FAILS (exit 4) with one line naming the
 key id and the values, before the signature is checked. A co-signing key the signed cosign member does
 not mark gets no such check (its key file entry's signer label alone does not mark it), and the PASS
 line prints no ARN for it.
@@ -725,6 +729,47 @@ def run_lab_verify(lab_verify, envelope, registry, expected_hash, python, accept
     return proc.returncode, code, output
 
 
+_ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
+_ASCII_DIGITS = "0123456789"
+_ASCII_KEY_ID_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+_AWS_PARTITIONS = ("aws", "aws-cn", "aws-us-gov", "aws-iso", "aws-iso-b", "aws-iso-e", "aws-iso-f", "aws-eusc")
+
+
+def _is_aws_region(value):
+    if not isinstance(value, str):
+        return False
+    parts = value.split("-")
+    if len(parts) not in (3, 4):
+        return False
+    head, middle, num = parts[0], parts[1:-1], parts[-1]
+    if not (2 <= len(head) <= 4 and all(c in _ASCII_LOWER for c in head)):
+        return False
+    if not all(2 <= len(part) <= 12 and all(c in _ASCII_LOWER for c in part) for part in middle):
+        return False
+    return bool(num) and num[0] != "0" and all(c in _ASCII_DIGITS for c in num)
+
+
+def _is_valid_kms_key_arn(arn, resource):
+    """Strict AWS KMS key ARN: arn:<partition>:kms:<region>:<12-digit-account>:key/<resource>."""
+    if not isinstance(arn, str) or not isinstance(resource, str) or not resource:
+        return False
+    if resource[0] == "-" or resource[-1] == "-" or not all(c in _ASCII_KEY_ID_CHARS for c in resource):
+        return False
+    parts = arn.split(":")
+    if len(parts) != 6:
+        return False
+    scheme, partition, service, region, account, res = parts
+    return (
+        scheme == "arn"
+        and partition in _AWS_PARTITIONS
+        and service == "kms"
+        and _is_aws_region(region)
+        and len(account) == 12
+        and all(c in _ASCII_DIGITS for c in account)
+        and res == "key/" + resource
+    )
+
+
 def cosigning_kms_key(cosign, key_id, entry):
     """A CO-SIGNING LAB KMS KEY (module docstring), for a co-signature's signed cosign member, its key_id and
     that key's key file entry: None when the cosign member does not mark the key, or marks it and it is that
@@ -739,10 +784,13 @@ def cosigning_kms_key(cosign, key_id, entry):
                 "cosign.signer %r, signed cosign.kms_key_arn %r): both must say signer kms and the id must be "
                 "%s<the KMS key's resource id>" % (key_id, entry_signer, signed_signer, arn, prefix))
     resource = key_id[len(prefix):]
-    if (not isinstance(arn, str) or not arn.startswith("arn:") or arn.split(":")[2:3] != ["kms"]
-            or not arn.endswith(":key/" + resource)):
-        return ("co-signature key %r: the signed cosign.kms_key_arn %r is not the ARN of the KMS key that id "
-                "names (key/%s)" % (key_id, arn, resource))
+    if not _is_valid_kms_key_arn(arn, resource):
+        return ("co-signature key %r: the signed cosign.kms_key_arn %r is not a valid AWS KMS key ARN for "
+                "key/%s" % (key_id, arn, resource))
+    pinned_arn = entry.get("kms_key_arn")
+    if pinned_arn is not None and (not isinstance(pinned_arn, str) or pinned_arn != arn):
+        return ("co-signature key %r: the signed cosign.kms_key_arn %r does not match the key file entry's "
+                "pinned kms_key_arn %r" % (key_id, arn, pinned_arn))
     return None
 
 
@@ -915,17 +963,23 @@ def main(argv):
     if pq_required_unmet:
         print("verdict: FAIL (post-quantum required: %s)" % pq_required_unmet)
         return EXIT_SIGNATURE
-    # The ARNs a signer-kms PASS names are compared values only: the record's own (bin/lab-verify's check_kms_key,
+    # The ARNs a signer-kms PASS names are validated values only: the record's own (bin/lab-verify's check_kms_key,
     # on both of its paths) and, beside a co-signature that checked out above, the signed cosign.kms_key_arn
-    # (check_cosignature passes a cosign member that has one only when cosigning_kms_key found it to be its key's).
-    arns, cosign = [signed_md.get("kms_key_arn")], None
+    # (check_cosignature passes a cosign member that has one only when cosigning_kms_key validated it).
+    primary_arn = signed_md.get("kms_key_arn")
+    primary_pinned = entry is not None and primary_arn is not None and entry.get("kms_key_arn") == primary_arn
+    kms_arns, cosign = [(primary_arn, primary_pinned)], None
     if pq:
         signatures = "its ML-DSA-87 (post-quantum) signature is valid"
     elif pq_present:
         signatures = ("its Ed25519 signature AND its ML-DSA-87 (post-quantum) co-signature over the same bytes "
                       "are valid")
         cosign = signed_md["cosign"]
-        arns.append(cosign.get("kms_key_arn"))
+        cosign_arn = cosign.get("kms_key_arn")
+        if cosign_arn is not None:
+            cosign_entry = key_entry(registry, cosign["key_id"])
+            cosign_pinned = cosign_entry is not None and cosign_entry.get("kms_key_arn") == cosign_arn
+            kms_arns.append((cosign_arn, cosign_pinned))
     else:
         signatures = "its Ed25519 signature is valid"
     kind = loads_strict(envelope["signed_payload"]).get("receipt_type")
@@ -934,11 +988,28 @@ def main(argv):
     custody = "(lab profile, lab keys, not a trust root; KMS custody is the key file's statement, not checked offline)"
     if kms and cosign is not None and "kms_key_arn" not in cosign:
         # a co-signing key the signed bytes name no KMS key for: cosigning_kms_key let it through unmarked
-        keys = (": the record's key, which the key file pins as AWS KMS key %s, and the co-signing key %s (key file "
+        primary_desc = (
+            "which the key file pins as AWS KMS key %s" % primary_arn
+            if primary_pinned
+            else "marked signer kms in the key file (signed record names AWS KMS key %s; "
+                 "the key file does not pin kms_key_arn)" % primary_arn
+        )
+        keys = (": the record's key, %s, and the co-signing key %s (key file "
                 "entry signer %r), for which the signed bytes name no KMS key %s"
-                % (arns[0], cosign["key_id"], key_entry(registry, cosign["key_id"]).get("signer"), custody))
+                % (primary_desc, cosign["key_id"], key_entry(registry, cosign["key_id"]).get("signer"), custody))
     elif kms:
-        keys = " the key file pins as AWS KMS keys %s %s" % (", ".join(a for a in arns if a is not None), custody)
+        named = [(a, p) for a, p in kms_arns if a is not None]
+        if named and all(p for _, p in named):
+            keys = " the key file pins as AWS KMS keys %s %s" % (", ".join(a for a, _ in named), custody)
+        elif not any(p for _, p in named):
+            keys = (" marked signer kms in the key file, for which the signed record names AWS KMS keys %s "
+                    "(the key file does not pin kms_key_arn) %s" % (", ".join(a for a, _ in named), custody))
+        else:
+            pinned_list = ", ".join(a for a, p in named if p)
+            unpinned_list = ", ".join(a for a, p in named if not p)
+            keys = (": pinned in the key file as AWS KMS key %s; marked signer kms in the key file, "
+                    "for which the signed record names AWS KMS key %s (the key file does not pin kms_key_arn) %s"
+                    % (pinned_list, unpinned_list, custody))
     else:
         keys = " (DEGRADED (lab): dev keys served by the lab, not a trust root)"
     if opts["checkpoint"]:

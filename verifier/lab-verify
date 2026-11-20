@@ -89,7 +89,8 @@ THE CHECKS, in order (an accusation needs standing, so it waits until the key fi
      dev key ids (LabSigner's seat table; a pin compares the two); or, for signer kms: the key
      file's entry says signer kms, the key id is KMS_KEY_ID_PREFIX[the entry's algorithm] + a
      resource id (LabKms.key_id_prefixes/0; a pin compares the two), and the signed
-     metadata.kms_key_arn is a KMS key ARN ending in key/<that resource id>;
+     metadata.kms_key_arn is a valid AWS KMS key ARN for key/<that resource id> (and matches
+     the key file entry's kms_key_arn when that field is present);
   8. the act hash the record binds equals --act-hash, byte for byte: the signed metadata.act_hash;
      for an effector record without one, the signed payload_hash; for a CEASE (verdict in CEASE_VERDICTS), the
      signed metadata.display_digest. A record that is no CEASE and binds none is refused here
@@ -107,10 +108,12 @@ is still DEGRADED (lab) and exits 5: on the Ed25519 path with verdict_code lab_k
 record's signed signer is kms; lab_dev_key is a signer-dev record's only;
 a CEASE exits 0 there, lab_recorded_no_authority, as for a dev key),
 on the ML-DSA-87 path with lab_signature_unchecked_mldsa87 as for any record there. The message says
-ONLY what this file can establish offline: the record was signed by a lab key the
-key file given pins as AWS KMS key <kms_key_arn> (signer kms), its signature checked against that
-pinned public key (on the ML-DSA-87 path: by mix requisition.lab.verify_mldsa87, not here); that
-the private key is held in AWS KMS and never exported is the key file's statement, not checked.
+ONLY what this file can establish offline: when the key file entry carries a matching kms_key_arn,
+the record was signed by a lab key the key file given pins as AWS KMS key <kms_key_arn> (signer kms);
+otherwise the key file marks it signer kms and does not pin kms_key_arn, and <kms_key_arn> is what
+the signed record names. Its signature is checked against the public key in the key file (on the
+ML-DSA-87 path: by mix requisition.lab.verify_mldsa87, not here); that the private key is held in
+AWS KMS and never exported is the key file's statement, not checked.
 
 EXIT CODES: 0 (on the Ed25519 path, a CEASE record that passed: RECORDED (no authority),
 lab_recorded_no_authority), 5 (a lab record that passed: lab_dev_key, lab_kms_key or
@@ -218,16 +221,68 @@ MLDSA87_SIGNATURE_BYTES = 4627
 
 DEGRADED_ED25519 = "DEGRADED (lab): one dev key, legacy format, not a trust root"
 # What offline checking proves about a signer-kms record, no more.
-KMS_DEGRADED = (
+KMS_DEGRADED_PINNED = (
     "DEGRADED (lab): signed by a lab key the key file given pins as AWS KMS key %s (signer kms); "
     "the signature is checked against that pinned public key%s; that the private key is held in "
     "AWS KMS and never exported is the key file's statement, not checked offline; lab profile, "
     "lab key, not a trust root"
 )
+KMS_DEGRADED_UNPINNED = (
+    "DEGRADED (lab): signed by a lab key marked signer kms in the key file given, for which the "
+    "signed record names AWS KMS key %s (the key file does not pin kms_key_arn); the signature is "
+    "checked against the public key in the key file%s; that the private key is held in AWS KMS "
+    "and never exported is the key file's statement, not checked offline; lab profile, lab key, "
+    "not a trust root"
+)
 
 
-def kms_degraded(signed, checked_by=""):
-    return KMS_DEGRADED % (signed["metadata"].get("kms_key_arn"), checked_by)
+def kms_degraded(signed, entry, checked_by=""):
+    arn = signed["metadata"].get("kms_key_arn")
+    template = KMS_DEGRADED_PINNED if entry.get("kms_key_arn") == arn else KMS_DEGRADED_UNPINNED
+    return template % (arn, checked_by)
+
+
+_ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
+_ASCII_DIGITS = "0123456789"
+_ASCII_KEY_ID_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+_AWS_PARTITIONS = ("aws", "aws-cn", "aws-us-gov", "aws-iso", "aws-iso-b", "aws-iso-e", "aws-iso-f", "aws-eusc")
+
+
+def _is_aws_region(value):
+    if not isinstance(value, str):
+        return False
+    parts = value.split("-")
+    if len(parts) not in (3, 4):
+        return False
+    head, middle, num = parts[0], parts[1:-1], parts[-1]
+    if not (2 <= len(head) <= 4 and all(c in _ASCII_LOWER for c in head)):
+        return False
+    if not all(2 <= len(part) <= 12 and all(c in _ASCII_LOWER for c in part) for part in middle):
+        return False
+    return bool(num) and num[0] != "0" and all(c in _ASCII_DIGITS for c in num)
+
+
+def _is_valid_kms_key_arn(arn, resource):
+    """Strict AWS KMS key ARN: arn:<partition>:kms:<region>:<12-digit-account>:key/<resource>."""
+    if not isinstance(arn, str) or not isinstance(resource, str) or not resource:
+        return False
+    if resource[0] == "-" or resource[-1] == "-" or not all(c in _ASCII_KEY_ID_CHARS for c in resource):
+        return False
+    parts = arn.split(":")
+    if len(parts) != 6:
+        return False
+    scheme, partition, service, region, account, res = parts
+    return (
+        scheme == "arn"
+        and partition in _AWS_PARTITIONS
+        and service == "kms"
+        and _is_aws_region(region)
+        and len(account) == 12
+        and all(c in _ASCII_DIGITS for c in account)
+        and res == "key/" + resource
+    )
+
+
 DEGRADED_MLDSA87 = (
     "DEGRADED (lab): ML-DSA-87 signature NOT CHECKED by this verifier "
     "(the stdlib has no ML-DSA)"
@@ -620,15 +675,17 @@ def check_kms_key(metadata, key_id, entry):
         )
     arn = metadata.get("kms_key_arn")
     resource = key_id[len(prefix):]
-    if (
-        not isinstance(arn, str)
-        or not arn.startswith("arn:")
-        or arn.split(":")[2:3] != ["kms"]
-        or not arn.endswith(":key/" + resource)
-    ):
+    if not _is_valid_kms_key_arn(arn, resource):
         refuse(
-            "the signed metadata.kms_key_arn %r is not the ARN of the KMS key key_id %r names "
+            "the signed metadata.kms_key_arn %r is not a valid AWS KMS key ARN for key_id %r "
             "(key/%s)." % (arn, key_id, resource),
+            verdict_code="lab_kms_key_arn_mismatch",
+        )
+    pinned_arn = entry.get("kms_key_arn")
+    if pinned_arn is not None and (not isinstance(pinned_arn, str) or pinned_arn != arn):
+        refuse(
+            "the signed metadata.kms_key_arn %r does not match the key file entry's pinned "
+            "kms_key_arn %r for key_id %r." % (arn, pinned_arn, key_id),
             verdict_code="lab_kms_key_arn_mismatch",
         )
 
@@ -855,7 +912,7 @@ def main(argv):
                 "the lab checks: kind, labels, key id and the display digest bound.\n%s\n"
                 "RECORDED (no authority): a record-only act (a CEASE), signed by %s; it "
                 "authorises nothing.\n\nverdict_code: lab_recorded_no_authority"
-                % (key_id, cosig, kms_degraded(signed) if kms else "the lab's dev key")
+                % (key_id, cosig, kms_degraded(signed, entry) if kms else "the lab's dev key")
             )
             sys.exit(EXIT_RECORDED)
         head = (
@@ -864,7 +921,7 @@ def main(argv):
             "the lab checks: kind, labels, key id and act hash bound.\n%s\n%s\n" % (key_id, signed_verdict(signed), cosig)
         )
         if kms:
-            print(head + kms_degraded(signed) + "\n\nverdict_code: lab_kms_key")
+            print(head + kms_degraded(signed, entry) + "\n\nverdict_code: lab_kms_key")
         else:
             print(head + DEGRADED_ED25519 + "\n\nverdict_code: lab_dev_key")
         sys.exit(EXIT_LAB)
@@ -878,7 +935,7 @@ def main(argv):
             verdict_code="lab_checkpoint_unchecked_mldsa87",
         )
     kms_note = (
-        "\n" + kms_degraded(signed, " by mix requisition.lab.verify_mldsa87 (not by this verifier)")
+        "\n" + kms_degraded(signed, entry, " by mix requisition.lab.verify_mldsa87 (not by this verifier)")
         if signed["metadata"].get("signer") == KMS_SIGNER
         else ""
     )

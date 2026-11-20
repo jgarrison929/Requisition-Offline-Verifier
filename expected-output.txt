@@ -10,7 +10,7 @@
   | the lab checks: kind, labels, key id and act hash bound.
   | signed verdict: none (a requisition.lab.statement.v0, not a decision)
   | 
-  | DEGRADED (lab): signed by a lab key the key file given pins as AWS KMS key arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf (signer kms); the signature is checked against that pinned public key; that the private key is held in AWS KMS and never exported is the key file's statement, not checked offline; lab profile, lab key, not a trust root
+  | DEGRADED (lab): signed by a lab key marked signer kms in the key file given, for which the signed record names AWS KMS key arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf (the key file does not pin kms_key_arn); the signature is checked against the public key in the key file; that the private key is held in AWS KMS and never exported is the key file's statement, not checked offline; lab profile, lab key, not a trust root
   | 
   | verdict_code: lab_kms_key
   lab-verify exit 5, verdict_code lab_kms_key
@@ -20,7 +20,7 @@
   ML-DSA-87 signature: valid under requisition_lab_kms_mldsa87_fd9cf1e7-608c-4f34-b5fe-cdf4cc37620d (key fingerprint f28a4da4a0657c6dbc0a1558055ed8992f58dace0478492841ba86342893c71c), pure, empty context, checked by the vendored mldsa 1.0.1 (sha256 0e8885d01ed76919...)
   both signatures verified: the Ed25519 signature (by bin/lab-verify) and the ML-DSA-87 co-signature (by this tool)
   post-quantum REQUIRED (--require-pq): met
-verdict: PASS -- the record is bound to these arguments and its Ed25519 signature AND its ML-DSA-87 (post-quantum) co-signature over the same bytes are valid under the LAB key(s) the key file pins as AWS KMS keys arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf, arn:aws:kms:us-east-2:847072440326:key/fd9cf1e7-608c-4f34-b5fe-cdf4cc37620d (lab profile, lab keys, not a trust root; KMS custody is the key file's statement, not checked offline). What it decided is its signed verdict, above.
+verdict: PASS -- the record is bound to these arguments and its Ed25519 signature AND its ML-DSA-87 (post-quantum) co-signature over the same bytes are valid under the LAB key(s) marked signer kms in the key file, for which the signed record names AWS KMS keys arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf, arn:aws:kms:us-east-2:847072440326:key/fd9cf1e7-608c-4f34-b5fe-cdf4cc37620d (the key file does not pin kms_key_arn) (lab profile, lab keys, not a trust root; KMS custody is the key file's statement, not checked offline). What it decided is its signed verdict, above.
 
 ######## record/decision.json
 == 1. the binding: these arguments, this act type, this signed record
@@ -35,7 +35,7 @@ verdict: PASS -- the record is bound to these arguments and its Ed25519 signatur
   | the lab checks: kind, labels, key id and act hash bound.
   | signed verdict: allow (the record's own; the exit code does not tell an allow from a deny)
   | 
-  | DEGRADED (lab): signed by a lab key the key file given pins as AWS KMS key arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf (signer kms); the signature is checked against that pinned public key; that the private key is held in AWS KMS and never exported is the key file's statement, not checked offline; lab profile, lab key, not a trust root
+  | DEGRADED (lab): signed by a lab key marked signer kms in the key file given, for which the signed record names AWS KMS key arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf (the key file does not pin kms_key_arn); the signature is checked against the public key in the key file; that the private key is held in AWS KMS and never exported is the key file's statement, not checked offline; lab profile, lab key, not a trust root
   | 
   | verdict_code: lab_kms_key
   lab-verify exit 5, verdict_code lab_kms_key
@@ -45,6 +45,6 @@ verdict: PASS -- the record is bound to these arguments and its Ed25519 signatur
   ML-DSA-87 signature: valid under requisition_lab_kms_mldsa87_fd9cf1e7-608c-4f34-b5fe-cdf4cc37620d (key fingerprint f28a4da4a0657c6dbc0a1558055ed8992f58dace0478492841ba86342893c71c), pure, empty context, checked by the vendored mldsa 1.0.1 (sha256 0e8885d01ed76919...)
   both signatures verified: the Ed25519 signature (by bin/lab-verify) and the ML-DSA-87 co-signature (by this tool)
   post-quantum REQUIRED (--require-pq): met
-verdict: PASS -- the record is bound to these arguments and its Ed25519 signature AND its ML-DSA-87 (post-quantum) co-signature over the same bytes are valid under the LAB key(s) the key file pins as AWS KMS keys arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf, arn:aws:kms:us-east-2:847072440326:key/fd9cf1e7-608c-4f34-b5fe-cdf4cc37620d (lab profile, lab keys, not a trust root; KMS custody is the key file's statement, not checked offline). What it decided is its signed verdict, above.
+verdict: PASS -- the record is bound to these arguments and its Ed25519 signature AND its ML-DSA-87 (post-quantum) co-signature over the same bytes are valid under the LAB key(s) marked signer kms in the key file, for which the signed record names AWS KMS keys arn:aws:kms:us-east-2:847072440326:key/303190ba-5445-49ec-9d8c-95b804b8c5cf, arn:aws:kms:us-east-2:847072440326:key/fd9cf1e7-608c-4f34-b5fe-cdf4cc37620d (the key file does not pin kms_key_arn) (lab profile, lab keys, not a trust root; KMS custody is the key file's statement, not checked offline). What it decided is its signed verdict, above.
 
 RESULT: PASS (both records verify)
