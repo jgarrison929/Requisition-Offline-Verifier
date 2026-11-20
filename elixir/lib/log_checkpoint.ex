@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Sudo Apt Holdings LLC (Script Kitty OS & Labs)
-# Derived by scripts/derive.exs from verify_receipt_checkpoint.exs, sha256 b60a950096ba703050fa553577245703980d30f4c0fad97db918353af64aac28.
+# Derived by scripts/derive.exs from verify_receipt_checkpoint.exs, sha256 c08e5bcd7a466b4b3f2e6d60f01465ce1caf596e8b7ffc858aca7360e795fa07.
 #
 # verify_receipt_checkpoint.exs -- the log checkpoint checks of verify_receipt.exs, loaded by it (Code.require_file)
 # only when a checkpoint flag is given, so a receipt checked without one compiles none of this. Not run on its own.
@@ -137,6 +137,9 @@ defmodule RequisitionReceiptVerifier.LogCheckpoint do
     if not Enum.all?(members, &Map.has_key?(acc.components, &1)),
       do: usage("the witness policy, line #{n}: a member is not defined above it")
 
+    if length(Enum.uniq(members)) != length(members),
+      do: usage("the witness policy, line #{n}: a member is repeated")
+
     %{acc | components: Map.put(acc.components, name, {:group, count, members})}
   end
 
@@ -238,11 +241,139 @@ defmodule RequisitionReceiptVerifier.LogCheckpoint do
 
   defp cosignature_ok?(_key, _text, _raw), do: false
 
-  defp satisfied?(policy, name, signers) do
-    case policy.components[name] do
-      {:witness, w} -> MapSet.member?(signers, {w.name, w.id})
-      {:group, count, members} -> Enum.count(members, &satisfied?(policy, &1, signers)) >= count
+  defp popcount(0, acc), do: acc
+  defp popcount(n, acc), do: popcount(n >>> 1, acc + (n &&& 1))
+
+  defp minimal_masks(masks) do
+    masks
+    |> Enum.sort_by(&{popcount(&1, 0), &1})
+    |> Enum.reduce([], fn mask, minimal ->
+      if Enum.any?(minimal, &((&1 &&& mask) == &1)), do: minimal, else: [mask | minimal]
+    end)
+  end
+
+  defp postorder(components, root) do
+    do_postorder(components, [{root, false}], %{}, [])
+  end
+
+  defp do_postorder(_components, [], _state, order), do: Enum.reverse(order)
+
+  defp do_postorder(components, [{node, true} | rest], state, order) do
+    if Map.get(state, node) == 1 do
+      do_postorder(components, rest, Map.put(state, node, 2), [node | order])
+    else
+      do_postorder(components, rest, state, order)
     end
+  end
+
+  defp do_postorder(components, [{node, false} | rest], state, order) do
+    if Map.has_key?(state, node) do
+      do_postorder(components, rest, state, order)
+    else
+      children =
+        case components[node] do
+          {:group, _count, members} ->
+            members
+            |> Enum.uniq()
+            |> Enum.reject(&Map.has_key?(state, &1))
+            |> Enum.map(&{&1, false})
+
+          {:witness, _w} ->
+            []
+        end
+
+      do_postorder(components, children ++ [{node, true} | rest], Map.put(state, node, 1), order)
+    end
+  end
+
+  defp satisfied?(policy, name, signers) do
+    components = policy.components
+    order = postorder(components, name)
+
+    paths =
+      order
+      |> Enum.reverse()
+      |> Enum.reduce(%{name => 1}, fn node, acc ->
+        count_paths = Map.get(acc, node, 0)
+
+        case components[node] do
+          {:group, _count, members} when count_paths > 0 ->
+            Enum.reduce(Enum.uniq(members), acc, fn member, a ->
+              Map.put(a, member, min(Map.get(a, member, 0) + count_paths, 2))
+            end)
+
+          _ ->
+            acc
+        end
+      end)
+
+    key_uses =
+      Enum.reduce(order, %{}, fn node, acc ->
+        case components[node] do
+          {:witness, w} ->
+            if MapSet.member?(signers, {w.name, w.id}) do
+              Map.put(acc, w.public, min(Map.get(acc, w.public, 0) + Map.get(paths, node, 0), 2))
+            else
+              acc
+            end
+
+          _ ->
+            acc
+        end
+      end)
+
+    {shared_bits, _} =
+      Enum.reduce(key_uses, {%{}, 0}, fn {pub, uses}, {bits, idx} ->
+        if uses >= 2, do: {Map.put(bits, pub, 1 <<< idx), idx + 1}, else: {bits, idx}
+      end)
+
+    solutions =
+      Enum.reduce(order, %{}, fn node, sols ->
+        node_sols =
+          case components[node] do
+            {:witness, w} ->
+              if MapSet.member?(signers, {w.name, w.id}),
+                do: [Map.get(shared_bits, w.public, 0)],
+                else: []
+
+            {:group, count, members} ->
+              init_dp = Map.put(Map.new(1..count//1, &{&1, MapSet.new()}), 0, MapSet.new([0]))
+
+              dp =
+                Enum.reduce(Enum.uniq(members), init_dp, fn member, dp ->
+                  case Map.fetch!(sols, member) do
+                    [] ->
+                      dp
+
+                    msols ->
+                      Enum.reduce((count - 1)..0//-1, dp, fn j, dp_acc ->
+                        cur = Map.fetch!(dp_acc, j)
+
+                        if MapSet.size(cur) == 0 do
+                          dp_acc
+                        else
+                          nxt =
+                            Enum.reduce(cur, Map.fetch!(dp_acc, j + 1), fn mask, acc ->
+                              Enum.reduce(msols, acc, fn m, a ->
+                                if (mask &&& m) == 0, do: MapSet.put(a, mask ||| m), else: a
+                              end)
+                            end)
+
+                          if MapSet.size(nxt) == 0,
+                            do: dp_acc,
+                            else: Map.put(dp_acc, j + 1, MapSet.new(minimal_masks(nxt)))
+                        end
+                      end)
+                  end
+                end)
+
+              dp |> Map.fetch!(count) |> minimal_masks()
+          end
+
+        Map.put(sols, node, node_sols)
+      end)
+
+    Map.fetch!(solutions, name) != []
   end
 
   def cosigned(policy, note, logs) do

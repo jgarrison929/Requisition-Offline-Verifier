@@ -9,7 +9,7 @@ defmodule RequisitionReceiptVerifier.PackageTest do
   # verify_receipt.exs and verify_receipt_checkpoint.exs of requisition main 61e49fea (its verifier SHA256SUMS)
   @sources %{
     "sources/verify_receipt.exs" => "d8b618dc6fadd7557981fd62e7e3520708b741085ff9cc6c1569b8fb5f4fdbe0",
-    "sources/verify_receipt_checkpoint.exs" => "b60a950096ba703050fa553577245703980d30f4c0fad97db918353af64aac28"
+    "sources/verify_receipt_checkpoint.exs" => "c08e5bcd7a466b4b3f2e6d60f01465ce1caf596e8b7ffc858aca7360e795fa07"
   }
   @apache "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
   @spdx "# SPDX-License-Identifier: Apache-2.0"

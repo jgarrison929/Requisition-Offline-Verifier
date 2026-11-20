@@ -590,6 +590,8 @@ def checkpoint_policy(raw):
                 raise CheckpointUsage("the witness policy, line %d: the threshold %r" % (number, threshold))
             if any(member not in components for member in members):
                 raise CheckpointUsage("the witness policy, line %d: a member is not defined above it" % number)
+            if len(set(members)) != len(members):
+                raise CheckpointUsage("the witness policy, line %d: a member is repeated" % number)
             components[name] = ("group", count, members)
         elif word == "quorum" and len(fields) >= 2:
             if quorum is not None:
@@ -686,11 +688,85 @@ def _cp_cosignature(key, text, raw):
     return ed25519_verify(raw[12:], message, key["public"])
 
 
+def _cp_minimal_masks(masks):
+    """Keep only inclusion-minimal bitmasks from `masks`."""
+    ordered = sorted(masks, key=lambda m: (m.bit_count(), m))
+    minimal = []
+    for mask in ordered:
+        if not any((seen & mask) == seen for seen in minimal):
+            minimal.append(mask)
+    return minimal
+
+
 def _cp_satisfied(policy, name, signers):
-    component = policy["components"][name]
-    if component[0] == "witness":
-        return (component[1]["name"], component[1]["id"]) in signers
-    return sum(1 for member in component[2] if _cp_satisfied(policy, member, signers)) >= component[1]
+    """True when `signers` satisfy `name` without counting any witness key more than once."""
+    components = policy["components"]
+    order, state = [], {}
+    stack = [(name, False)]
+    while stack:
+        node, done = stack.pop()
+        if done:
+            if state.get(node) == 1:
+                state[node] = 2
+                order.append(node)
+            continue
+        if node in state:
+            continue
+        state[node] = 1
+        stack.append((node, True))
+        component = components[node]
+        if component[0] == "group":
+            for member in reversed(list(dict.fromkeys(component[2]))):
+                if member not in state:
+                    stack.append((member, False))
+
+    paths = {name: 1}
+    for node in reversed(order):
+        count_paths = paths.get(node, 0)
+        component = components[node]
+        if count_paths and component[0] == "group":
+            for member in dict.fromkeys(component[2]):
+                paths[member] = min(paths.get(member, 0) + count_paths, 2)
+
+    key_uses = {}
+    for node in order:
+        component = components[node]
+        if component[0] == "witness":
+            key = component[1]
+            if (key["name"], key["id"]) in signers:
+                pub = key["public"]
+                key_uses[pub] = min(key_uses.get(pub, 0) + paths.get(node, 0), 2)
+
+    shared_bits = {}
+    for pub, uses in key_uses.items():
+        if uses >= 2:
+            shared_bits[pub] = 1 << len(shared_bits)
+
+    solutions = {}
+    for node in order:
+        component = components[node]
+        if component[0] == "witness":
+            key = component[1]
+            solutions[node] = [shared_bits.get(key["public"], 0)] if (key["name"], key["id"]) in signers else []
+        else:
+            count, members = component[1], list(dict.fromkeys(component[2]))
+            dp = [{0}] + [set() for _ in range(count)]
+            for member in members:
+                msols = solutions[member]
+                if not msols:
+                    continue
+                for j in range(count - 1, -1, -1):
+                    if not dp[j]:
+                        continue
+                    nxt = dp[j + 1]
+                    for mask in dp[j]:
+                        for m in msols:
+                            if (mask & m) == 0:
+                                nxt.add(mask | m)
+                    if nxt:
+                        dp[j + 1] = set(_cp_minimal_masks(nxt))
+            solutions[node] = _cp_minimal_masks(dp[count])
+    return bool(solutions[name])
 
 
 def checkpoint_cosigned(policy, note, logs):

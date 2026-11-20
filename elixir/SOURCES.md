@@ -8,7 +8,7 @@ Requisition receipt verifier. The scripts are kept unchanged in `elixir/sources/
 | script | SHA-256 |
 |---|---|
 | `elixir/sources/verify_receipt.exs` | `d8b618dc6fadd7557981fd62e7e3520708b741085ff9cc6c1569b8fb5f4fdbe0` |
-| `elixir/sources/verify_receipt_checkpoint.exs` | `b60a950096ba703050fa553577245703980d30f4c0fad97db918353af64aac28` |
+| `elixir/sources/verify_receipt_checkpoint.exs` | `c08e5bcd7a466b4b3f2e6d60f01465ce1caf596e8b7ffc858aca7360e795fa07` |
 
 | package file | made from |
 |---|---|
