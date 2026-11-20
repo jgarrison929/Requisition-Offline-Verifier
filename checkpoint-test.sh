@@ -24,10 +24,12 @@ def at(name):
 
 bad = 0
 for case in manifest["cases"]:
+    # The published synthetic checkpoint vectors omit display_projection_digest; opt out explicitly here.
     argv = [sys.executable, "-I", "verifier/verify_offline.py",
             "--arguments", at(manifest["arguments"]), "--act-type", manifest["act_type"],
             "--record", at(case["record"]), "--registry", at(manifest["registry"]),
             "--lab-verify", "verifier/lab-verify",
+            "--allow-missing-display-digest",
             "--checkpoint", at(case["checkpoint"]), "--inclusion-proof", at(case["inclusion_proof"]),
             "--witness-policy", at(case["witness_policy"])]
     if case["held"] is not None:

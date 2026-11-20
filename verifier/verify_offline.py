@@ -21,8 +21,9 @@ Two independent halves, both reported:
     over ARGS with "act_type" put inside (Requisition's ActHash.derive/3; label
     sha384+canonical_payload.v3) and the arguments digest = SHA-256 of CanonicalPayload v3 over ARGS
     (Requisition's Effector.encode/2), and compares them with the SIGNED bytes: metadata.act_hash (the
-    signed payload_hash when the metadata carries none), act_type, act_hash_alg, and, when the record
-    signs one, display_digest (in a decision: display_projection_digest).
+    signed payload_hash when the metadata carries none), act_type, act_hash_alg, and display_digest
+    (in a decision: display_projection_digest). A record missing that display digest member is
+    refused as ABSENT unless --allow-missing-display-digest is given explicitly.
     A record under any other label (the withdrawn sha384+canonical_payload.v4 string included; an older opaque one)
     is a MISMATCH on act_hash_alg, and a record with none is refused as ABSENT; neither is ever a pass.
     bin/lab-verify alone takes --act-hash as given and never recomputes it; this is
@@ -99,7 +100,8 @@ bin/lab-verify applies the same rule itself to the record's own key, Ed25519 or 
 POST-QUANTUM BY POLICY: when the key file holds an ML-DSA-87 key of the record's signer that was usable at the record's
 signed instant, an ML-DSA-87 signature (the record's own, or a co-signature) is REQUIRED without --require-pq: the
 record's own ``cosign`` claim does not decide it. --allow-classical-only lifts that (explicit); --require-pq still
-requires it of every record. A flag may only tighten, except --allow-classical-only, which exists to be seen.
+requires it of every record. A flag may only tighten, except --allow-classical-only and --allow-missing-display-digest,
+which exist to be seen.
 
 LOG CHECKPOINTS (CHECKPOINTS.md, beside this repository's README). The checkpoint flags are handed, as given, to
 bin/lab-verify, which hands them to Requisition's verify_receipt.py: the record's inclusion under a checkpoint of the
@@ -647,7 +649,7 @@ def derivation_label(envelope):
     return LABEL
 
 
-def check_binding(args, act_type, envelope):
+def check_binding(args, act_type, envelope, allow_missing_display_digest=False):
     """Return (lines, ok, recomputed_act_hash)."""
     lines, ok = [], True
     label = derivation_label(envelope)
@@ -687,13 +689,19 @@ def check_binding(args, act_type, envelope):
     ]
     if digest_member in md:
         checks.append((digest_member, digest, md.get(digest_member)))
+    elif allow_missing_display_digest:
+        lines.append("%s: not signed in this record (allowed by --allow-missing-display-digest; the act_hash above binds every argument)" % digest_member)
     else:
-        lines.append("%s: not signed in this record (the act_hash above binds every argument)" % digest_member)
+        checks.append((digest_member, digest, None))
     for name, mine, theirs in checks:
         if name == "act_hash_alg" and "act_hash_alg" not in md:
             # no member is not a label that differs: an absent act_hash_alg fails for every kind of record
             ok = False
             lines.append("act_hash_alg: ABSENT (the signed record carries no act_hash_alg member; recomputed %s)" % mine)
+            continue
+        if name == digest_member and digest_member not in md:
+            ok = False
+            lines.append("%s: ABSENT (the signed record carries no %s member; recomputed %s)" % (name, name, mine))
             continue
         same = mine == theirs
         ok = ok and same
@@ -787,6 +795,9 @@ def main(argv):
         elif argv[i] == "--allow-classical-only":
             opts["allow-classical-only"] = True
             i += 1
+        elif argv[i] == "--allow-missing-display-digest":
+            opts["allow-missing-display-digest"] = True
+            i += 1
         elif argv[i] == "--accept-signer" and i + 1 < len(argv) and argv[i + 1]:
             opts.setdefault("accept-signer", []).append(argv[i + 1])
             i += 2
@@ -802,7 +813,8 @@ def main(argv):
         else:
             print("usage: verify_offline.py --arguments ARGS.json --act-type NAME --record RECORD.json "
                   "--lab-verify PATH --registry KEYS.json [--cosignature COSIG.json] [--require-pq] [--allow-classical-only] "
-                  "[--accept-signer LABEL]... [--python python3] [--checkpoint NOTE --inclusion-proof PROOF.json "
+                  "[--allow-missing-display-digest] [--accept-signer LABEL]... [--python python3] "
+                  "[--checkpoint NOTE --inclusion-proof PROOF.json "
                   "--witness-policy POLICY [--held-size N --held-root ROOT | --held-state FILE [--write-held-state]] "
                   "[--consistency-proof PROOF.json] [--key-transition RECORD.json]]",
                   file=sys.stderr)
@@ -817,7 +829,10 @@ def main(argv):
         envelope = envelope_of(record)
         cosignature = load(opts["cosignature"]) if "cosignature" in opts else cosignature_of(record)
         registry = load(opts["registry"])
-        lines, ok, recomputed = check_binding(args, opts["act-type"], envelope)
+        lines, ok, recomputed = check_binding(
+            args, opts["act-type"], envelope,
+            allow_missing_display_digest=bool(opts.get("allow-missing-display-digest")),
+        )
     except (OSError, ValueError) as error:
         print("binding: UNREADABLE (%s)" % error)
         print("verdict: FAIL")

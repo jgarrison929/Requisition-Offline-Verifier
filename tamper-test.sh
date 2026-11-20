@@ -49,5 +49,83 @@ r=load('record/decision.json'); r['decision']['signature']=base64.b64encode(B+by
 run_case "ML-DSA-87 co-signature removed from the decision" failed "$edit_json
 r=load('record/decision.json'); del r['cosignature']; save('record/decision.json',r)"
 
+sign_local='import base64,hashlib,importlib.util,json
+def _mod(name,path):
+    spec=importlib.util.spec_from_file_location(name,path); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+vr=_mod("vr","verifier/verify_receipt.py")
+vo=_mod("vo","verifier/verify_offline.py")
+def _enc(pt): return (pt[1]|((pt[0]&1)<<255)).to_bytes(32,"little")
+def make_dev_fixture(kind, include_digest=True, digest_override=None):
+    seed=bytes(range(32)); h=hashlib.sha512(seed).digest()
+    a=int.from_bytes(h[:32],"little"); a&=(1<<254)-8; a|=1<<254; prefix=h[32:]
+    pub=_enc(vr._scalarmult(vr.B,a))
+    with open("record/arguments.json") as f: args=json.load(f)
+    ah=vo.act_hash("payments.refund_send",args)
+    dd=vo.display_digest(args)
+    md={"act_hash":ah,"act_hash_alg":"sha384+canonical_payload.v3","act_type":"payments.refund_send",
+        "hands":"one-person (G-301)","key_id":"requisition_lab_dev_ed25519_v0",
+        "n6_profile":"not_followed","profile":"lab","signer":"dev"}
+    if kind=="requisition.lab.decision.v0":
+        md["verdict"]="allow"
+        member="display_projection_digest"
+    else:
+        member="display_digest"
+    if include_digest:
+        md[member]=dd if digest_override is None else digest_override
+    payload_obj={"chain_scope":"requisition-lab:account:test","metadata":md,
+                 "occurred_at":"2026-11-16T20:30:09Z","payload_hash":None,"previous_hash":None,
+                 "receipt_type":kind,"schema_version":"agent_receipt.v1","sequence":1,
+                 "status":"recorded","subject_id":"test-subject","subject_type":"requisition.lab.nonce_claim"}
+    payload=vo.encode(payload_obj).decode("utf-8")
+    msg=payload.encode("utf-8")
+    r=int.from_bytes(hashlib.sha512(prefix+msg).digest(),"little")%vr.Q
+    R=_enc(vr._scalarmult(vr.B,r))
+    k=int.from_bytes(hashlib.sha512(R+pub+msg).digest(),"little")%vr.Q
+    sig=R+((r+k*a)%vr.Q).to_bytes(32,"little")
+    env={"signature":base64.b64encode(sig).decode(),"key_id":"requisition_lab_dev_ed25519_v0",
+         "signed_payload":payload,"receipt_hash":hashlib.sha256(msg).hexdigest()}
+    keys={"schema":"requisition_lab_key_file.v1","entries":[{
+        "algorithm":"ed25519","key_id":"requisition_lab_dev_ed25519_v0","profile":"lab",
+        "public_key":base64.b64encode(pub).decode(),"public_key_fingerprint":hashlib.sha256(pub).hexdigest(),
+        "signer":"dev","status":"active","status_changed_at":"2026-11-09T00:00:00Z",
+        "valid_from":"2026-11-09T00:00:00Z","valid_to":None}]}
+    with open("local-record.json","w") as f: json.dump(env,f)
+    with open("local-keys.json","w") as f: json.dump(keys,f)
+'
+
+run_offline_case() {  # $1 = name, $2 = expected outcome (passed|failed), $3 = expected substring (may be empty), $4 = extra verify_offline flag (may be empty), $5 = python setup
+  dir="$work/$1"
+  mkdir "$dir" && cp -R "$here/record" "$here/verifier" "$dir/" || exit 2
+  (cd "$dir" && python3 -I -c "$5") || exit 2
+  if [ -n "$4" ]; then
+    python3 -I "$dir/verifier/verify_offline.py" \
+      --arguments "$dir/record/arguments.json" --act-type payments.refund_send \
+      --record "$dir/local-record.json" --registry "$dir/local-keys.json" \
+      --lab-verify "$dir/verifier/lab-verify" "$4" > "$dir/output.txt" 2>&1
+  else
+    python3 -I "$dir/verifier/verify_offline.py" \
+      --arguments "$dir/record/arguments.json" --act-type payments.refund_send \
+      --record "$dir/local-record.json" --registry "$dir/local-keys.json" \
+      --lab-verify "$dir/verifier/lab-verify" > "$dir/output.txt" 2>&1
+  fi
+  rc=$?
+  if [ "$rc" -eq 0 ]; then got=passed; else got=failed; fi
+  matched=1
+  if [ -n "$3" ] && ! grep -F -q -- "$3" "$dir/output.txt"; then matched=0; fi
+  if [ "$got" = "$2" ] && [ "$matched" -eq 1 ]; then echo "ok          $1 -> verification ${got}, as expected"
+  else echo "UNEXPECTED  $1 -> verification ${got} (rc=$rc, expected $2${3:+, match '$3'})"; bad=1; fi
+}
+
+run_offline_case "locally signed decision with display_projection_digest" passed "display_projection_digest: equal" "" "$sign_local
+make_dev_fixture('requisition.lab.decision.v0', include_digest=True)"
+run_offline_case "locally signed decision missing display_projection_digest" failed "display_projection_digest: ABSENT" "" "$sign_local
+make_dev_fixture('requisition.lab.decision.v0', include_digest=False)"
+run_offline_case "locally signed statement missing display_digest" failed "display_digest: ABSENT" "" "$sign_local
+make_dev_fixture('requisition.lab.statement.v0', include_digest=False)"
+run_offline_case "locally signed decision missing display_projection_digest with opt-out flag" passed "allowed by --allow-missing-display-digest" "--allow-missing-display-digest" "$sign_local
+make_dev_fixture('requisition.lab.decision.v0', include_digest=False)"
+run_offline_case "locally signed decision with mismatched display_projection_digest and opt-out flag" failed "display_projection_digest: MISMATCH" "--allow-missing-display-digest" "$sign_local
+make_dev_fixture('requisition.lab.decision.v0', include_digest=True, digest_override='0'*64)"
+
 if [ "$bad" -eq 0 ]; then echo "RESULT: PASS (the untouched copy verifies; every tampered copy is refused)"; else echo "RESULT: FAIL"; fi
 exit "$bad"
